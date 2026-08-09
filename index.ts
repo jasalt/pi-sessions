@@ -26,7 +26,7 @@ const INTERACTIVE_MODE_SPINNER_PATCHED = Symbol.for(
 
 type ExtensionAPI = any;
 type CommandContext = any;
-type Activity = "idle" | "working" | "waiting";
+type Activity = "idle" | "working";
 type LiveState = "active" | "suspended" | "starting" | "stopped" | "error";
 type WorkingIndicatorOptions = { frames?: string[]; intervalMs?: number };
 
@@ -263,20 +263,6 @@ function inferToolPaths(toolName: string, input: any): string[] {
 		}
 	}
 	return [...paths];
-}
-
-function needsPermission(
-	toolName: string,
-	input: any,
-	sessionName: string,
-): string | null {
-	if (toolName === "bash") {
-		const command = asString(input?.command) || "";
-		if (/\bsudo\b|\brm\s+(-rf?|--recursive|--force)/i.test(command)) {
-			return `Dangerous bash command in ${sessionName}: ${command}`;
-		}
-	}
-	return null;
 }
 
 function resetExtendedKeyboardModesForHandoff(): void {
@@ -1013,23 +999,6 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("tool_call", async (event: any, ctx: CommandContext) => {
 		const record = host.bindSessionContext(ctx);
-		const reason = needsPermission(event.toolName, event.input, record.name);
-		if (reason) {
-			if (record.id !== host.activeId) host.updateActivity(ctx, "waiting");
-			const ok = await ctx.ui.confirm("pi-sessions permission", reason, {
-				timeout: 60000,
-			} as any);
-			if (ok && record.id !== host.activeId) {
-				record.activity = "working";
-				record.lastActivityAt = Date.now();
-				host.notify();
-			}
-			if (!ok)
-				return {
-					block: true,
-					reason: "Denied by pi-sessions permission routing",
-				};
-		}
 		const paths = inferToolPaths(event.toolName, event.input);
 		if (!paths.length) return undefined;
 		const result = host.locks.acquire(record.id, paths, ctx.cwd || record.cwd);
@@ -1048,12 +1017,6 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("tool_result", async (event: any, ctx: CommandContext) => {
 		host.locks.releaseByToolCall(event.toolCallId);
-		const record = host.bindSessionContext(ctx);
-		if (record.activity === "waiting") {
-			record.activity = "working";
-			record.lastActivityAt = Date.now();
-			host.notify();
-		}
 		return undefined;
 	});
 
