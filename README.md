@@ -41,6 +41,11 @@ All session operations happen inside that switcher.
 - `Ctrl-C` — clone the current (attached) session, mirroring regular Pi `/clone`
   (fork at the current position) but opened as a new live child session; the
   original session keeps running.
+- `Ctrl-F` — fork the current (attached) session using Pi's original fork point
+  selection menu: pick a user message and the active path up to that point is
+  copied into a new live child session (the original keeps running), with the
+  selected message's text pre-filled in the new session's editor — the same
+  behavior as Pi's native `/fork`.
 - `Esc` — close switcher.
 
 ## Runtime model

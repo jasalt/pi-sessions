@@ -1172,6 +1172,18 @@ async function getResumeSessions(): Promise<any[]> {
 	);
 }
 
+function extractUserMessageText(content: any): string {
+	if (typeof content === "string") return content;
+	if (!Array.isArray(content)) return "";
+	return content
+		.filter(
+			(part: any) =>
+				part?.type === "text" && typeof part.text === "string",
+		)
+		.map((part: any) => part.text)
+		.join("");
+}
+
 async function openSessions(
 	ctx: CommandContext,
 	host: PiSessionsHost,
@@ -1236,6 +1248,115 @@ async function openSessions(
 				record.cwd,
 				ctx,
 			);
+			targetToActivate = child.id;
+		},
+		getForkMessages: () => {
+			const id =
+				host.activeId === PARENT_SESSION_ID
+					? PARENT_SESSION_ID
+					: host.activeId;
+			const record = host.get(id);
+			if (!record) return [];
+			const entries = record.sessionManager?.getEntries?.() ?? [];
+			const messages: { id: string; text: string }[] = [];
+			for (const entry of entries) {
+				if (entry.type !== "message") continue;
+				if (entry.message?.role !== "user") continue;
+				const text = extractUserMessageText(entry.message.content);
+				if (text) messages.push({ id: entry.id, text });
+			}
+			return messages;
+		},
+		forkSessionAt: async (entryId: string) => {
+			// Mirror regular Pi /fork (fork at a selected user message, position
+			// "before") but keep the original running and open the fork as a new
+			// parallel session instead of replacing the current one.
+			const id =
+				host.activeId === PARENT_SESSION_ID
+					? PARENT_SESSION_ID
+					: host.activeId;
+			const record = host.get(id);
+			if (!record) throw new Error("session not found");
+			if (!record.sessionFile || !fs.existsSync(record.sessionFile)) {
+				throw new Error(
+					"This session has not been saved yet. Wait for the first assistant response before forking it.",
+				);
+			}
+			// Branch from a separate SessionManager so the live session is untouched.
+			const branch = SessionManager.open(
+				record.sessionFile,
+				undefined,
+				record.cwd,
+			);
+			const selectedEntry = branch.getEntry?.(entryId);
+			if (
+				!selectedEntry ||
+				selectedEntry.type !== "message" ||
+				selectedEntry.message?.role !== "user"
+			) {
+				throw new Error("Invalid fork point");
+			}
+			const selectedText = extractUserMessageText(
+				selectedEntry.message.content,
+			);
+			// Pi's native /fork (position "before") branches from the parent of the
+			// selected user message and pre-fills the new session's editor with its
+			// text.
+			const targetLeafId = selectedEntry.parentId ?? null;
+			let newFile: string | undefined;
+			if (targetLeafId) {
+				newFile = branch.createBranchedSession(targetLeafId);
+			} else {
+				// Fork at the very first message: a brand-new empty session whose
+				// header points at the source session file.
+				const manager = SessionManager.create(
+					record.cwd,
+					branch.getSessionDir(),
+				);
+				newFile = manager.newSession({
+					parentSession: record.sessionFile,
+				});
+				if (newFile) {
+					const header = manager.getHeader?.();
+					if (header) {
+						fs.writeFileSync(newFile, `${JSON.stringify(header)}\n`);
+					}
+				}
+			}
+			if (!newFile) throw new Error("Failed to create forked session");
+			if (!fs.existsSync(newFile)) {
+				// createBranchedSession defers the file write until the first
+				// assistant message when the branch contains no assistant message
+				// yet (e.g. forking at a session's first message). Persist the
+				// branch now so the fork exists as a real session file; the fork's
+				// SessionManager.open() will mark it flushed and append cleanly.
+				try {
+					const entries = [
+						branch.getHeader?.(),
+						...(branch.getEntries?.() ?? []),
+					].filter(Boolean);
+					fs.writeFileSync(
+						newFile,
+						entries.map((e: any) => `${JSON.stringify(e)}\n`).join(""),
+					);
+				} catch {
+					throw new Error(
+						"This session has not been saved yet. Wait for the first assistant response before forking it.",
+					);
+				}
+			}
+			const child = await host.openSavedSessionAsLive(
+				newFile,
+				record.cwd,
+				ctx,
+			);
+			if (selectedText) {
+				// Pre-fill the fork's editor with the selected message text, exactly
+				// like Pi's native fork flow.
+				try {
+					(child.mode as any)?.editor?.setText?.(selectedText);
+				} catch {}
+			}
 			targetToActivate = child.id;
 		},
 		resumeSession: async (sessionPath?: string) => {

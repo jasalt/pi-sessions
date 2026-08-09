@@ -14,6 +14,7 @@ import {
 	type Component,
 	type Focusable,
 } from "@earendil-works/pi-tui";
+import { UserMessageSelectorComponent } from "@earendil-works/pi-coding-agent";
 
 type SessionInfo = {
 	id: string;
@@ -38,6 +39,11 @@ type SavedSessionInfo = {
 	messageCount?: number;
 };
 
+type ForkMessage = {
+	id: string;
+	text: string;
+};
+
 type SessionsActions = {
 	getSessions: () => Promise<SessionInfo[]>;
 	getResumeSessions?: () => Promise<SavedSessionInfo[]>;
@@ -47,6 +53,8 @@ type SessionsActions = {
 	newSession: () => Promise<void>;
 	newSessionInFolder: (cwd: string) => Promise<void>;
 	cloneSession: () => Promise<void>;
+	forkSessionAt: (entryId: string) => Promise<void>;
+	getForkMessages: () => ForkMessage[];
 	resumeSession: (sessionPath?: string) => Promise<void>;
 	killSession: (id: string) => Promise<void>;
 	notify: (message: string, type?: "info" | "warning" | "error") => void;
@@ -67,7 +75,10 @@ type WorkingIndicatorOptions = {
 	intervalMs?: number;
 };
 
-function isCtrl(data: string, key: "c" | "o" | "r" | "k" | "p" | "n"): boolean {
+function isCtrl(
+	data: string,
+	key: "c" | "o" | "r" | "k" | "p" | "n" | "f",
+): boolean {
 	const codes: Record<string, string> = {
 		c: "\x03",
 		o: "\x0f",
@@ -75,6 +86,7 @@ function isCtrl(data: string, key: "c" | "o" | "r" | "k" | "p" | "n"): boolean {
 		k: "\x0b",
 		p: "\x10",
 		n: "\x0e",
+		f: "\x06",
 	};
 	return data === codes[key] || matchesKey(data, Key.ctrl(key));
 }
@@ -841,6 +853,41 @@ class ResumeSessionPicker implements Component, Focusable {
 	dispose(): void {}
 }
 
+class ForkSelector {
+	private readonly selector: any;
+	private readonly requestRender: () => void;
+
+	constructor(
+		messages: ForkMessage[],
+		onSelect: (entryId: string | null) => void,
+		requestRender: () => void,
+	) {
+		this.requestRender = requestRender;
+		const initialSelectedId =
+			messages.length > 0 ? messages[messages.length - 1]!.id : undefined;
+		// Reuse Pi's original fork point selection menu component.
+		this.selector = new UserMessageSelectorComponent(
+			messages,
+			(entryId: string) => onSelect(entryId),
+			() => onSelect(null),
+			initialSelectedId,
+		);
+	}
+
+	render(width: number): string[] {
+		return this.selector.render(width);
+	}
+
+	invalidate(): void {
+		this.selector.invalidate?.();
+	}
+
+	handleInput(data: string): void {
+		this.selector.getMessageList()?.handleInput(data);
+		this.requestRender();
+	}
+}
+
 class SessionsView {
 	private sessions: SessionInfo[] = [];
 	private selected = 0;
@@ -856,6 +903,7 @@ class SessionsView {
 	private readonly requestRender: () => void;
 	private folderExplorer: FileExplorer | null = null;
 	private resumePicker: ResumeSessionPicker | null = null;
+	private forkSelector: ForkSelector | null = null;
 	private timer: NodeJS.Timeout | null = null;
 
 	constructor(
@@ -986,6 +1034,10 @@ class SessionsView {
 			this.resumePicker.handleInput(data);
 			return;
 		}
+		if (this.forkSelector) {
+			this.forkSelector.handleInput(data);
+			return;
+		}
 		if (matchesKey(data, "escape")) {
 			this.close();
 			return;
@@ -1043,6 +1095,49 @@ class SessionsView {
 					);
 					this.requestRender();
 				});
+			return;
+		}
+		if (isCtrl(data, "f")) {
+			// Fork the current (attached) session at a selected user message,
+			// using Pi's original fork point selection menu. The fork opens as
+			// a new parallel session; the original keeps running.
+			let messages: ForkMessage[] = [];
+			try {
+				messages = this.actions.getForkMessages();
+			} catch (error) {
+				this.actions.notify(
+					error instanceof Error ? error.message : String(error),
+					"warning",
+				);
+				this.requestRender();
+				return;
+			}
+			if (messages.length === 0) {
+				this.actions.notify("No messages to fork from", "warning");
+				return;
+		}
+			this.forkSelector = new ForkSelector(
+				messages,
+				(entryId: string | null) => {
+					this.forkSelector = null;
+					if (entryId) {
+						void this.actions
+							.forkSessionAt(entryId)
+							.then(() => this.close())
+							.catch((error: unknown) => {
+								this.actions.notify(
+									error instanceof Error ? error.message : String(error),
+									"warning",
+								);
+								this.requestRender();
+							});
+					} else {
+						this.requestRender();
+					}
+				},
+				this.requestRender,
+			);
+			this.requestRender();
 			return;
 		}
 		if (matchesKey(data, "up") || isCtrl(data, "p")) {
@@ -1113,6 +1208,7 @@ class SessionsView {
 	render(width: number): string[] {
 		if (this.folderExplorer) return this.folderExplorer.render(width);
 		if (this.resumePicker) return this.resumePicker.render(width);
+		if (this.forkSelector) return this.forkSelector.render(width);
 
 		const th = this.theme;
 		const border = (color: "accent" | "dim" = "accent") =>
@@ -1205,8 +1301,10 @@ class SessionsView {
 					muted(" resume · ") +
 					dim("<C-k>") +
 					muted(" kill · ") +
-					dim("<C-c>") +
+						dim("<C-c>") +
 					muted(" clone · ") +
+					dim("<C-f>") +
+					muted(" fork · ") +
 					dim("<esc>") +
 					muted(" close"),
 				width,
@@ -1219,6 +1317,7 @@ class SessionsView {
 		this.filterInput.invalidate();
 		this.folderExplorer?.invalidate();
 		this.resumePicker?.invalidate();
+		this.forkSelector?.invalidate();
 	}
 
 	dispose(): void {
