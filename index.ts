@@ -1093,6 +1093,44 @@ async function openSessions(
 			const child = await host.createChildFromContext(ctx, cwd);
 			targetToActivate = child.id;
 		},
+		cloneSession: async () => {
+			// Mirror regular Pi /clone (fork at the current leaf, position "at")
+			// but keep the original running and open the clone as a new parallel
+			// session instead of replacing the current one.
+			const id =
+				host.activeId === PARENT_SESSION_ID
+					? PARENT_SESSION_ID
+					: host.activeId;
+			const record = host.get(id);
+			if (!record) throw new Error("session not found");
+			const leafId = record.sessionManager?.getLeafId?.();
+			if (!leafId) throw new Error("Nothing to clone yet");
+			if (!record.sessionFile || !fs.existsSync(record.sessionFile)) {
+				throw new Error(
+					"This session has not been saved yet. Wait for the first assistant response before cloning or forking it.",
+				);
+			}
+			// Branch from a separate SessionManager so the live session is untouched.
+			const branch = SessionManager.open(
+				record.sessionFile,
+				undefined,
+				record.cwd,
+			);
+			const branchLeaf = branch.getLeafId();
+			if (!branchLeaf) throw new Error("Nothing to clone yet");
+			const newFile = branch.createBranchedSession(branchLeaf);
+			if (!newFile || !fs.existsSync(newFile)) {
+				throw new Error(
+					"This session has not been saved yet. Wait for the first assistant response before cloning or forking it.",
+				);
+			}
+			const child = await host.openSavedSessionAsLive(
+				newFile,
+				record.cwd,
+				ctx,
+			);
+			targetToActivate = child.id;
+		},
 		resumeSession: async (sessionPath?: string) => {
 			if (!sessionPath) {
 				const sessions = await getResumeSessions();

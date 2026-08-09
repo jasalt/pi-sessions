@@ -46,6 +46,7 @@ type SessionsActions = {
 	switchTo: (id: string) => Promise<void>;
 	newSession: () => Promise<void>;
 	newSessionInFolder: (cwd: string) => Promise<void>;
+	cloneSession: () => Promise<void>;
 	resumeSession: (sessionPath?: string) => Promise<void>;
 	killSession: (id: string) => Promise<void>;
 	notify: (message: string, type?: "info" | "warning" | "error") => void;
@@ -66,8 +67,9 @@ type WorkingIndicatorOptions = {
 	intervalMs?: number;
 };
 
-function isCtrl(data: string, key: "o" | "r" | "k" | "p" | "n"): boolean {
+function isCtrl(data: string, key: "c" | "o" | "r" | "k" | "p" | "n"): boolean {
 	const codes: Record<string, string> = {
+		c: "\x03",
 		o: "\x0f",
 		r: "\x12",
 		k: "\x0b",
@@ -1028,6 +1030,21 @@ class SessionsView {
 			this.requestRender();
 			return;
 		}
+		if (isCtrl(data, "c")) {
+			// Clone the current (attached) session, mirroring regular Pi /clone,
+			// opened as a new parallel session via the extension.
+			void this.actions
+				.cloneSession()
+				.then(() => this.close())
+				.catch((error: unknown) => {
+					this.actions.notify(
+						error instanceof Error ? error.message : String(error),
+						"warning",
+					);
+					this.requestRender();
+				});
+			return;
+		}
 		if (matchesKey(data, "up") || isCtrl(data, "p")) {
 			this.selected = Math.max(0, this.selected - 1);
 			this.requestRender();
@@ -1188,6 +1205,8 @@ class SessionsView {
 					muted(" resume · ") +
 					dim("<C-k>") +
 					muted(" kill · ") +
+					dim("<C-c>") +
+					muted(" clone · ") +
 					dim("<esc>") +
 					muted(" close"),
 				width,

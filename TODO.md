@@ -41,3 +41,21 @@ Possible fix directions:
   or make it configurable.
 - Alternatively, leave the shortcut as-is and document the conflict + how to
   rebind either side in `keybindings.json`.
+
+## 3. Sessions menu opened from a child session shows only the parent
+
+Opening the switcher while a **child** session is active (Ctrl-R inside a
+child) renders a `1/1` list containing just the parent session — the active
+child is missing from its own switcher, and the `(current)` marker sits on the
+parent. From the parent, the same menu correctly lists all sessions. The
+widget, which reads the same host snapshot, shows all sessions in both cases.
+
+Additionally, when a child session's editor has focus, extension shortcut
+keys can fall through to the editor: during testing, keystrokes intended for
+the switcher (`C-o`, `C-c`) were delivered as editor input and "sub1"/"work2"
+were sent to the model as user messages. Only the parent's editor routes the
+extension's `ctrl+r`/`ctrl+o`/`ctrl+c` shortcuts reliably.
+
+Likely related to issue #2: the child mode's keybinding setup / shortcut
+registration path differs from the parent's. Worth investigating together
+with the shortcut conflict.

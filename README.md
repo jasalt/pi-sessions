@@ -38,6 +38,9 @@ All session operations happen inside that switcher.
 - `Ctrl-O` — open `FileExplorer`; selecting a folder creates a new child session in that folder and switches to it.
 - `Ctrl-R` — open a one-off resume flow; selecting a saved Pi session opens it as a live child and switches to it.
 - `Ctrl-K` — stop selected live child session.
+- `Ctrl-C` — clone the current (attached) session, mirroring regular Pi `/clone`
+  (fork at the current position) but opened as a new live child session; the
+  original session keeps running.
 - `Esc` — close switcher.
 
 ## Runtime model
