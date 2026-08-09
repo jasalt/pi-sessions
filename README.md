@@ -60,3 +60,15 @@ Child sessions are real native `InteractiveMode` instances, not embedded panels.
 All live sessions share one in-process lock manager. Before write/edit/mutating shell tools run, `pi-sessions` checks for conflicting path locks and blocks conflicting writes.
 
 This prevents two live sessions from editing the same path tree at once.
+
+## Resume / re-attach
+
+The set of live sessions is persisted to `~/.pi/agent/pi-sessions-state-<parentSessionId>.json` whenever the live set changes and on exit (C-c C-c). After quitting with C-c C-c, resume the parent session normally:
+
+```bash
+pi --session <parent-session-id>
+```
+
+All parallel sessions that were running before the exit are re-attached automatically as suspended live sessions — they reappear in the widget and switcher, and switching to one starts its runtime exactly like any other session. Resuming any former child session id works too: that session becomes the main session and all siblings (including the old parent) are re-attached alongside it.
+
+A fresh `pi` (no `--session`) never restores anything, and the state file is removed again once no parallel sessions remain.

@@ -20,6 +20,42 @@ import { SessionWidget, showSessionsView } from "./ui.ts";
 
 const PARENT_SESSION_ID = "__parent__";
 const HOST_KEY = "__PI_SESSIONS_HOST__";
+const STATE_FILE_PREFIX = "pi-sessions-state-";
+const STATE_FILE_VERSION = 1;
+
+function stateFilePath(sessionId: string | undefined): string | null {
+	if (!sessionId) return null;
+	// Session ids are uuidv7 (hex + dashes), safe for filenames.
+	return path.join(getAgentDir(), `${STATE_FILE_PREFIX}${sessionId}.json`);
+}
+
+function listStateFiles(): string[] {
+	try {
+		return fs
+			.readdirSync(getAgentDir())
+			.filter(
+				(name) =>
+					name.startsWith(STATE_FILE_PREFIX) && name.endsWith(".json"),
+			)
+			.map((name) => path.join(getAgentDir(), name));
+	} catch {
+		return [];
+	}
+}
+
+function readStateFile(file: string): any {
+	try {
+		const parsed = JSON.parse(fs.readFileSync(file, "utf8"));
+		if (
+			parsed?.version === STATE_FILE_VERSION &&
+			Array.isArray(parsed.sessions)
+		) {
+			return parsed;
+		}
+	} catch {}
+	return null;
+}
+
 const INTERACTIVE_MODE_SPINNER_PATCHED = Symbol.for(
 	"pi-sessions.interactiveMode.spinnerPatched",
 );
@@ -563,6 +599,119 @@ class PiSessionsHost {
 		return [parent, ...children].filter(Boolean);
 	}
 
+	/**
+	 * Persist the current live-session set so a later `pi --session <id>` resume
+	 * can re-attach the parallel sessions that were running in this process.
+	 * The state file is keyed by the parent session id, so concurrent processes
+	 * never clobber each other, and a fresh/unrelated session never restores it.
+	 */
+	persistState(): void {
+		const parent = this.records.get(PARENT_SESSION_ID);
+		const file = stateFilePath(parent?.sessionId);
+		if (!file) return;
+		const sessions = [...this.records.values()]
+			.filter(
+				(r) => r.sessionFile && !["stopped", "error"].includes(r.state),
+			)
+			.map((r) => ({
+				kind: r.kind,
+				id: r.id,
+				name: r.name,
+				cwd: r.cwd,
+				sessionFile: r.sessionFile,
+				sessionId: r.sessionId,
+			}));
+		try {
+			if (sessions.length <= 1) {
+				// No parallel sessions (or nothing persisted) — nothing to restore.
+				if (fs.existsSync(file)) fs.rmSync(file, { force: true });
+				return;
+			}
+			fs.writeFileSync(
+				file,
+				JSON.stringify(
+					{ version: STATE_FILE_VERSION, savedAt: Date.now(), sessions },
+					null,
+					2,
+				),
+			);
+		} catch {}
+	}
+
+	/**
+	 * Re-attach the parallel sessions that were live in a previous process when
+	 * the current session matches a recorded one (resumed via `pi --session`,
+	 * `pi -c`, or the resume picker). Restored children are created suspended,
+	 * exactly like sessions opened through the switcher: they appear in the
+	 * widget/switcher and start their runtime on first activation.
+	 * Returns the number of sessions restored.
+	 */
+	async tryRestoreFromState(ctx: CommandContext): Promise<number> {
+		const currentFile = ctx.sessionManager?.getSessionFile?.();
+		if (!currentFile) return 0;
+		const resolvedCurrent = path.resolve(currentFile);
+
+		// Prefer the state file keyed by the current session id (resumed parent),
+		// then fall back to scanning, which also covers resuming a former child.
+		const candidates: string[] = [];
+		const direct = stateFilePath(ctx.sessionManager?.getSessionId?.());
+		if (direct) candidates.push(direct);
+		for (const file of listStateFiles()) {
+			if (!candidates.includes(file)) candidates.push(file);
+		}
+
+		let state: any = null;
+		for (const file of candidates) {
+			state = readStateFile(file);
+			if (state) break;
+		}
+		if (!state) return 0;
+
+		const sessions = (state.sessions as any[]).filter(
+			(s) =>
+				s?.sessionFile &&
+				typeof s.sessionFile === "string" &&
+				fs.existsSync(s.sessionFile),
+		);
+		if (
+			!sessions.some(
+				(s) => path.resolve(s.sessionFile) === resolvedCurrent,
+			)
+		) {
+			// Current session is unrelated to the recorded set — don't resurrect.
+			return 0;
+		}
+
+		let restored = 0;
+		const failed: string[] = [];
+		for (const s of sessions) {
+			if (path.resolve(s.sessionFile) === resolvedCurrent) continue;
+			const existing = [...this.records.values()].find(
+				(r) => r.kind === "child" && r.sessionFile === s.sessionFile,
+			);
+			if (existing) continue;
+			try {
+				await this.openSavedSessionAsLive(
+					s.sessionFile,
+					typeof s.cwd === "string" ? s.cwd : undefined,
+					ctx,
+				);
+				restored++;
+			} catch {
+				failed.push(s.name || s.sessionId || s.sessionFile);
+			}
+		}
+		if (failed.length > 0) {
+			try {
+				ctx.ui.notify(
+					`Could not restore ${failed.length} session${failed.length === 1 ? "" : "s"}: ${failed.join(", ")}`,
+					"warning",
+				);
+			} catch {}
+		}
+		return restored;
+	}
+
 	registerParent(ctx: CommandContext): void {
 		const record = this.records.get(PARENT_SESSION_ID)!;
 		record.cwd = ctx.cwd || process.cwd();
@@ -745,6 +894,7 @@ class PiSessionsHost {
 			opts.sessionManager.getSessionFile?.(),
 		);
 		this.notify();
+		this.persistState();
 		return record;
 	}
 
@@ -763,6 +913,7 @@ class PiSessionsHost {
 		} catch {}
 		this.records.delete(record.id);
 		this.notify();
+		this.persistState();
 		if (wasActive) await this.activate(PARENT_SESSION_ID);
 	}
 
@@ -987,6 +1138,22 @@ export default function (pi: ExtensionAPI) {
 	pi.on("session_start", (_event: any, ctx: CommandContext) => {
 		host.bindSessionContext(ctx);
 		installWidget(ctx, host);
+		// Re-attach the parallel sessions that were live in the previous process.
+		// Fire-and-forget: restoring creates suspended child runtimes, which must
+		// not block first paint; the widget/switcher pick them up as they appear.
+		void host
+			.tryRestoreFromState(ctx)
+			.then((restored) => {
+				if (restored > 0) {
+					try {
+						ctx.ui.notify(
+							`Restored ${restored} parallel session${restored === 1 ? "" : "s"} from previous run`,
+							"info",
+						);
+					} catch {}
+				}
+			})
+			.catch(() => {});
 	});
 
 	pi.on("agent_start", (_event: any, ctx: CommandContext) => {
@@ -1023,6 +1190,7 @@ export default function (pi: ExtensionAPI) {
 	pi.on("session_shutdown", (_event: any, ctx: CommandContext) => {
 		const record = host.bindSessionContext(ctx);
 		host.locks.release(record.id);
+		host.persistState();
 		try {
 			ctx.ui.setWidget("pi-sessions", undefined);
 		} catch {}
