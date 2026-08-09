@@ -42,20 +42,24 @@ Possible fix directions:
 - Alternatively, leave the shortcut as-is and document the conflict + how to
   rebind either side in `keybindings.json`.
 
-## 3. Sessions menu opened from a child session shows only the parent
+## ~~3. Sessions menu opened from a child session shows only the parent~~ (fixed)
 
-Opening the switcher while a **child** session is active (Ctrl-R inside a
-child) renders a `1/1` list containing just the parent session — the active
-child is missing from its own switcher, and the `(current)` marker sits on the
-parent. From the parent, the same menu correctly lists all sessions. The
-widget, which reads the same host snapshot, shows all sessions in both cases.
+Root cause: child runtimes built by the extension constructed their own
+`DefaultResourceLoader` without the command-line resource paths, so child
+sessions loaded **no extensions at all** — no widget, no switcher, no
+shortcuts. The "1/1 menu" observed from a child was just the parent's stale
+last frame lingering in the terminal; shortcut keys fell through to the
+child's editor.
 
-Additionally, when a child session's editor has focus, extension shortcut
-keys can fall through to the editor: during testing, keystrokes intended for
-the switcher (`C-o`, `C-c`) were delivered as editor input and "sub1"/"work2"
-were sent to the model as user messages. Only the parent's editor routes the
-extension's `ctrl+r`/`ctrl+o`/`ctrl+c` shortcuts reliably.
+Fix: `createRuntime` now passes `resourceLoaderOptions` (CLI `-e`/`--extension`,
+`--skill`, `--prompt-template`, `--theme` paths, the `no-*` toggles, and system
+prompt overrides parsed from `process.argv`, plus this extension's own module
+path as a safety net) to `createAgentSessionServices`, so child sessions get
+the same extensions as the parent. `tryRestoreFromState` now skips sessions
+whose file is already covered by **any** live record (not just children),
+because restore also runs from child contexts now and must not re-open the
+already-live parent as a duplicate child.
 
-Likely related to issue #2: the child mode's keybinding setup / shortcut
-registration path differs from the parent's. Worth investigating together
-with the shortcut conflict.
+Verified: switcher from a child lists all sessions with the active child
+marked current; `C-c` clone, `C-o` new-in-folder, `C-k` kill, switching, and
+restore-on-resume all work from child sessions; no duplicate records.

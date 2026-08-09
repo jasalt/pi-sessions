@@ -2,7 +2,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import {
 	createAgentSessionFromServices,
 	createAgentSessionRuntime,
@@ -139,6 +139,109 @@ function sanitizeName(name: string): string {
 
 let modelResolverPromise: Promise<any> | null = null;
 const runtimeInheritanceBySessionManager = new WeakMap<object, any>();
+
+// CLI-loaded resource paths (from `-e`/`--extension`, `--skill`, ...) plus the
+// no-* toggles and system-prompt overrides. Captured from process.argv so child
+// runtimes built by this extension get the same extensions the parent got via
+// the command line (settings.json `packages` are re-read by the child loader).
+let cliResourceLoaderOptions: Record<string, any> = {};
+
+// Absolute path of this extension module, for self-registration into child
+// runtimes as a safety net when it was loaded via an unusual mechanism.
+const THIS_EXTENSION_PATH: string | undefined = (() => {
+	try {
+		return typeof import.meta.url === "string"
+			? fileURLToPath(import.meta.url)
+			: undefined;
+	} catch {
+		return undefined;
+	}
+})();
+
+function resolveCliResourcePath(value: string): string {
+	if (value.startsWith("~")) value = path.join(os.homedir(), value.slice(1));
+	return path.resolve(value);
+}
+
+/**
+ * Mirror pi's own CLI parsing (cli/args.js) for the resource options that the
+ * main process feeds into its DefaultResourceLoader, so parallel child runtimes
+ * load the same command-line extensions/skills/prompts/themes.
+ */
+function collectCliResourceLoaderOptions(
+	argv: string[],
+): Record<string, any> {
+	const extensions: string[] = [];
+	const skills: string[] = [];
+	const promptTemplates: string[] = [];
+	const themes: string[] = [];
+	const appendSystemPrompt: string[] = [];
+	const flags = new Set<string>();
+	let systemPrompt: string | undefined;
+	let i = 0;
+	const takeValue = (): string | undefined => {
+		const next = argv[i + 1];
+		if (next !== undefined && !next.startsWith("-")) return argv[++i];
+		return undefined;
+	};
+	for (; i < argv.length; i++) {
+		const arg = argv[i];
+		if (arg === "--extension" || arg === "-e") {
+			const value = takeValue();
+			if (value) extensions.push(value);
+		} else if (arg === "--skill") {
+			const value = takeValue();
+			if (value) skills.push(value);
+		} else if (arg === "--prompt-template") {
+			const value = takeValue();
+			if (value) promptTemplates.push(value);
+		} else if (arg === "--theme") {
+			const value = takeValue();
+			if (value) themes.push(value);
+		} else if (arg === "--system-prompt") {
+			const value = takeValue();
+			if (value) systemPrompt = value;
+		} else if (arg === "--append-system-prompt") {
+			const value = takeValue();
+			if (value) appendSystemPrompt.push(value);
+		} else if (arg === "--no-extensions" || arg === "-ne") {
+			flags.add("noExtensions");
+		} else if (arg === "--no-skills") {
+			flags.add("noSkills");
+		} else if (arg === "--no-prompt-templates" || arg === "-np") {
+			flags.add("noPromptTemplates");
+		} else if (arg === "--no-themes") {
+			flags.add("noThemes");
+		} else if (arg === "--no-context-files" || arg === "-nc") {
+			flags.add("noContextFiles");
+		}
+	}
+	if (THIS_EXTENSION_PATH) extensions.push(THIS_EXTENSION_PATH);
+	const dedupe = (values: string[]): string[] => {
+		const seen = new Set<string>();
+		const out: string[] = [];
+		for (const value of values) {
+			const resolved = resolveCliResourcePath(value);
+			if (seen.has(resolved)) continue;
+			seen.add(resolved);
+			out.push(resolved);
+		}
+		return out;
+	};
+	return {
+		additionalExtensionPaths: dedupe(extensions),
+		additionalSkillPaths: dedupe(skills),
+		additionalPromptTemplatePaths: dedupe(promptTemplates),
+		additionalThemePaths: dedupe(themes),
+		noExtensions: flags.has("noExtensions"),
+		noSkills: flags.has("noSkills"),
+		noPromptTemplates: flags.has("noPromptTemplates"),
+		noThemes: flags.has("noThemes"),
+		noContextFiles: flags.has("noContextFiles"),
+		systemPrompt,
+		appendSystemPrompt,
+	};
+}
 
 async function loadModelResolver(): Promise<any> {
 	modelResolverPromise ??= import(
@@ -494,6 +597,7 @@ const createRuntime: CreateAgentSessionRuntimeFactory = async ({
 		agentDir,
 		authStorage: inheritance.authStorage,
 		settingsManager: inheritedSettings.settingsManager,
+		resourceLoaderOptions: cliResourceLoaderOptions,
 	});
 	services.diagnostics.push(...inheritedSettings.diagnostics);
 	let sessionOptions: any = {};
@@ -686,8 +790,11 @@ class PiSessionsHost {
 		const failed: string[] = [];
 		for (const s of sessions) {
 			if (path.resolve(s.sessionFile) === resolvedCurrent) continue;
+			// Skip when ANY live record (parent or child) already covers the file;
+			// restore runs from child contexts too, where the parent is already
+			// represented by its kind="parent" record.
 			const existing = [...this.records.values()].find(
-				(r) => r.kind === "child" && r.sessionFile === s.sessionFile,
+				(r) => r.sessionFile === s.sessionFile,
 			);
 			if (existing) continue;
 			try {
@@ -1160,6 +1267,7 @@ async function openSessions(
 
 export default function (pi: ExtensionAPI) {
 	const host = getHost();
+	cliResourceLoaderOptions = collectCliResourceLoaderOptions(process.argv);
 	patchInteractiveModeWorkingIndicator(host);
 
 	pi.registerCommand("sessions", {

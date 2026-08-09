@@ -56,6 +56,10 @@ parent Pi process
 
 Child sessions are real native `InteractiveMode` instances, not embedded panels. When active, child UI is full-screen and native Pi slash-command UI works as usual.
 
+Child sessions load the same extensions as the parent (command-line `-e`
+paths are re-fed into each child's resource loader), so the switcher shortcut,
+`/sessions`, and the widget work from inside a child session too.
+
 `/quit` keeps native behavior and exits the whole Pi process.
 
 ## Path locks
