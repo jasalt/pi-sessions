@@ -464,7 +464,6 @@ export class FileExplorer implements Component, Focusable {
 				Math.min(this.selectedIndex, Math.max(0, this.entries.length - 1)),
 			);
 			this.error = undefined;
-			this.selectedIndex = Math.min(1, Math.max(0, this.entries.length - 1));
 		} catch (error) {
 			this.entries = [];
 			this.selectedIndex = 0;
